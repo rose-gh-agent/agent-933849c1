@@ -1,60 +1,78 @@
 import argparse
 from pathlib import Path
 
-import cv2
 import numpy as np
+from PIL import Image
 
 
-def convert_teal_metal_to_gold(input_path: Path, output_path: Path) -> None:
-    img = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
-    if img is None:
-        raise FileNotFoundError(f"Could not read image: {input_path}")
+def convert_to_yellow(input_path: Path, output_path: Path) -> None:
+    img = Image.open(input_path).convert("RGB")
+    data = np.array(img, dtype=np.float32) / 255.0
 
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
-    h = hsv[:, :, 0]
-    s = hsv[:, :, 1]
-    v = hsv[:, :, 2]
+    r = data[:, :, 0]
+    g = data[:, :, 1]
+    b = data[:, :, 2]
 
-    active_mask = (s > 20) & (v > 20)
-    teal_mask = active_mask & (h >= 75) & (h <= 125)
+    maxc = np.maximum(np.maximum(r, g), b)
+    minc = np.minimum(np.minimum(r, g), b)
+    v = maxc
+    s = np.zeros_like(maxc)
+    np.divide(maxc - minc, maxc, out=s, where=maxc != 0)
 
-    if not np.any(teal_mask):
-        raise RuntimeError("No teal/cyan metallic regions detected in the image.")
+    delta = maxc - minc
+    h = np.zeros_like(maxc)
 
-    new_h = h.copy()
-    source_low = 75.0
-    source_high = 125.0
-    target_low = 18.0
-    target_high = 38.0
+    mask = delta != 0
+    rm = mask & (maxc == r)
+    gm = mask & (maxc == g)
+    bm = mask & (maxc == b)
 
-    # Remap the detected teal/cyan band into a tighter gold range while
-    # preserving tonal detail through the untouched saturation/value channels.
-    remapped = np.interp(h[teal_mask], [source_low, source_high], [target_low, target_high])
-    new_h[teal_mask] = remapped % 180.0
-    hsv[:, :, 0] = new_h
+    h[rm] = ((g[rm] - b[rm]) / delta[rm]) % 6
+    h[gm] = (b[gm] - r[gm]) / delta[gm] + 2
+    h[bm] = (r[bm] - g[bm]) / delta[bm] + 4
+    h = h / 6.0
 
-    # A small saturation lift helps the remapped metal read as gold without
-    # disturbing brightness or global contrast.
-    new_s = s.copy()
-    new_s[teal_mask] = np.clip(s[teal_mask] * 1.15, 0, 255)
-    hsv[:, :, 1] = new_s
+    non_bg = (s > 0.05) & (v > 0.05)
+    h[non_bg] = 0.167
 
-    result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    h6 = h * 6.0
+    i = np.floor(h6).astype(int) % 6
+    f = h6 - np.floor(h6)
+    p = v * (1 - s)
+    q = v * (1 - s * f)
+    t = v * (1 - s * (1 - f))
+
+    result = np.zeros_like(data)
+    variants = [
+        (v, t, p),
+        (q, v, p),
+        (p, v, t),
+        (p, q, v),
+        (t, p, v),
+        (v, p, q),
+    ]
+    for idx, (ri, gi, bi) in enumerate(variants):
+        mask_i = i == idx
+        result[:, :, 0][mask_i] = ri[mask_i]
+        result[:, :, 1][mask_i] = gi[mask_i]
+        result[:, :, 2][mask_i] = bi[mask_i]
+
+    result[~non_bg] = data[~non_bg]
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    ok = cv2.imwrite(str(output_path), result, [cv2.IMWRITE_JPEG_QUALITY, 95])
-    if not ok:
-        raise RuntimeError(f"Failed to write output image: {output_path}")
+    result_img = Image.fromarray((result * 255).astype(np.uint8), "RGB")
+    result_img.save(output_path, quality=95)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Shift teal/cyan metallic image elements toward golden yellow."
+        description="Shift non-background hues in an image toward yellow using Pillow and numpy."
     )
     parser.add_argument("input", type=Path, help="Path to the source image")
     parser.add_argument("output", type=Path, help="Path to save the transformed image")
     args = parser.parse_args()
 
-    convert_teal_metal_to_gold(args.input, args.output)
+    convert_to_yellow(args.input, args.output)
     print(args.output)
 
 
